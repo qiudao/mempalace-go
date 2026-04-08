@@ -1,6 +1,7 @@
 package store
 
 import (
+	"math"
 	"path/filepath"
 	"testing"
 )
@@ -119,5 +120,117 @@ func TestSearchRanking(t *testing.T) {
 	}
 	if results[0].ID != "d2" {
 		t.Fatalf("expected d2 (more auth mentions) first, got %s", results[0].ID)
+	}
+}
+
+// makeVec creates a simple test vector of given dimension with a constant value.
+func makeVec(dim int, val float32) []float32 {
+	v := make([]float32, dim)
+	for i := range v {
+		v[i] = val
+	}
+	// L2 normalize
+	var norm float64
+	for _, f := range v {
+		norm += float64(f) * float64(f)
+	}
+	norm = math.Sqrt(norm)
+	for i := range v {
+		v[i] = float32(float64(v[i]) / norm)
+	}
+	return v
+}
+
+func TestAddWithEmbedding(t *testing.T) {
+	s := tempDB(t)
+	vec := makeVec(384, 1.0)
+
+	err := s.AddWithEmbedding(Drawer{
+		ID:       "v1",
+		Document: "test embedding storage",
+		Wing:     "test",
+		Room:     "embed",
+	}, vec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify drawer was stored
+	n, err := s.Count()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 drawer, got %d", n)
+	}
+
+	// Verify embedding can be retrieved via vector search
+	results, err := s.VectorSearch(vec, 1, Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].ID != "v1" {
+		t.Fatalf("expected v1, got %s", results[0].ID)
+	}
+}
+
+func TestVectorSearch(t *testing.T) {
+	s := tempDB(t)
+
+	// Create 3 vectors pointing in different directions
+	vecA := make([]float32, 384)
+	vecB := make([]float32, 384)
+	vecC := make([]float32, 384)
+	for i := range vecA {
+		vecA[i] = 1.0
+		vecB[i] = 1.0
+		vecC[i] = -1.0
+	}
+	// Make B slightly different from A
+	for i := 0; i < 50; i++ {
+		vecB[i] = 0.5
+	}
+
+	s.AddWithEmbedding(Drawer{ID: "a", Document: "doc a", Wing: "w1", Room: "r1"}, vecA)
+	s.AddWithEmbedding(Drawer{ID: "b", Document: "doc b", Wing: "w1", Room: "r2"}, vecB)
+	s.AddWithEmbedding(Drawer{ID: "c", Document: "doc c", Wing: "w2", Room: "r1"}, vecC)
+
+	// Query with vecA — should return a first, then b, then c
+	results, err := s.VectorSearch(vecA, 3, Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("expected 3 results, got %d", len(results))
+	}
+	if results[0].ID != "a" {
+		t.Fatalf("expected a first, got %s", results[0].ID)
+	}
+	if results[1].ID != "b" {
+		t.Fatalf("expected b second, got %s", results[1].ID)
+	}
+	if results[2].ID != "c" {
+		t.Fatalf("expected c last, got %s", results[2].ID)
+	}
+
+	// Test with wing filter
+	results, err = s.VectorSearch(vecA, 10, Query{Wing: "w1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results with wing filter, got %d", len(results))
+	}
+
+	// Test limit
+	results, err = s.VectorSearch(vecA, 1, Query{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result with limit, got %d", len(results))
 	}
 }

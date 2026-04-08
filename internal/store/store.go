@@ -2,7 +2,9 @@ package store
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -74,6 +76,11 @@ func (s *Store) init() error {
 			INSERT INTO drawers_fts(drawers_fts, rowid, document) VALUES('delete', old.rowid, old.document);
 			INSERT INTO drawers_fts(rowid, document) VALUES (new.rowid, new.document);
 		END;
+		CREATE TABLE IF NOT EXISTS embeddings (
+			drawer_id TEXT PRIMARY KEY,
+			vector    BLOB,
+			FOREIGN KEY(drawer_id) REFERENCES drawers(id) ON DELETE CASCADE
+		);
 	`)
 	return err
 }
@@ -234,6 +241,111 @@ func (s *Store) Search(text string, limit int, q Query) ([]SearchResult, error) 
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// AddWithEmbedding inserts a drawer and its embedding vector.
+func (s *Store) AddWithEmbedding(d Drawer, vec []float32) error {
+	if err := s.Add(d); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO embeddings (drawer_id, vector) VALUES (?, ?)`,
+		d.ID, float32ToBytes(vec),
+	)
+	return err
+}
+
+// VectorSearch finds drawers by cosine similarity to the query vector.
+func (s *Store) VectorSearch(query []float32, limit int, q Query) ([]SearchResult, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+
+	where, args := q.buildWhere()
+
+	sqlQuery := `
+		SELECT d.id, d.document, d.wing, d.room, d.source, d.filed_at, d.hall, e.vector
+		FROM embeddings e
+		JOIN drawers d ON d.id = e.drawer_id
+	`
+	if where != "" {
+		sqlQuery += " WHERE " + where
+	}
+
+	rows, err := s.db.Query(sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type scored struct {
+		SearchResult
+	}
+	var all []scored
+	for rows.Next() {
+		var sr scored
+		var vecBlob []byte
+		if err := rows.Scan(&sr.ID, &sr.Document, &sr.Wing, &sr.Room,
+			&sr.Source, &sr.FiledAt, &sr.Hall, &vecBlob); err != nil {
+			return nil, err
+		}
+		vec := bytesToFloat32(vecBlob)
+		sr.Rank = cosineSim(query, vec)
+		all = append(all, sr)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Sort by similarity descending
+	for i := 0; i < len(all); i++ {
+		for j := i + 1; j < len(all); j++ {
+			if all[j].Rank > all[i].Rank {
+				all[i], all[j] = all[j], all[i]
+			}
+		}
+	}
+
+	if len(all) > limit {
+		all = all[:limit]
+	}
+
+	results := make([]SearchResult, len(all))
+	for i, s := range all {
+		results[i] = s.SearchResult
+	}
+	return results, nil
+}
+
+func float32ToBytes(v []float32) []byte {
+	buf := make([]byte, len(v)*4)
+	for i, f := range v {
+		binary.LittleEndian.PutUint32(buf[i*4:], math.Float32bits(f))
+	}
+	return buf
+}
+
+func bytesToFloat32(b []byte) []float32 {
+	n := len(b) / 4
+	v := make([]float32, n)
+	for i := range v {
+		v[i] = math.Float32frombits(binary.LittleEndian.Uint32(b[i*4:]))
+	}
+	return v
+}
+
+func cosineSim(a, b []float32) float64 {
+	var dot, normA, normB float64
+	for i := range a {
+		dot += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
+	}
+	denom := math.Sqrt(normA) * math.Sqrt(normB)
+	if denom == 0 {
+		return 0
+	}
+	return dot / denom
 }
 
 func (s *Store) scanDrawers(query string, args ...any) ([]Drawer, error) {

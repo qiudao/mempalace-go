@@ -10,18 +10,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mempalace/mempalace-go/internal/embed"
+	"github.com/mempalace/mempalace-go/internal/search"
 	"github.com/mempalace/mempalace-go/internal/store"
 )
 
 // Question represents a single LongMemEval benchmark question.
 type Question struct {
-	QuestionText string      `json:"question"`
-	QuestionID   string      `json:"question_id"`
-	QuestionType string      `json:"question_type"`
-	Answer       json.RawMessage `json:"answer"`
-	SessionIDs   []string    `json:"haystack_session_ids"`
-	Sessions     [][]Message `json:"haystack_sessions"`
-	Dates        []string    `json:"haystack_dates"`
+	QuestionText     string          `json:"question"`
+	QuestionID       string          `json:"question_id"`
+	QuestionType     string          `json:"question_type"`
+	Answer           json.RawMessage `json:"answer"`
+	AnswerSessionIDs []string        `json:"answer_session_ids"`
+	SessionIDs       []string        `json:"haystack_session_ids"`
+	Sessions         [][]Message     `json:"haystack_sessions"`
+	Dates            []string        `json:"haystack_dates"`
 }
 
 // Message represents a single chat message in a session.
@@ -34,11 +37,26 @@ func main() {
 	dataPath := flag.String("data", "", "Path to longmemeval JSON")
 	limitQ := flag.Int("limit", 0, "Limit number of questions (0 = all)")
 	csvOut := flag.String("csv", "", "Output CSV path")
+	mode := flag.String("mode", "raw", "Search mode: raw, hybrid, or vector")
 	flag.Parse()
 
 	if *dataPath == "" {
-		fmt.Fprintln(os.Stderr, "Usage: bench --data <longmemeval.json> [--limit N] [--csv output.csv]")
+		fmt.Fprintln(os.Stderr, "Usage: bench --data <longmemeval.json> [--limit N] [--csv output.csv] [--mode raw|hybrid|vector]")
 		os.Exit(1)
+	}
+
+	// Initialize embedder for vector mode (reuse across questions)
+	var emb *embed.Embedder
+	if *mode == "vector" {
+		home, _ := os.UserHomeDir()
+		modelDir := filepath.Join(home, ".cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx")
+		var err2 error
+		emb, err2 = embed.NewEmbedder(modelDir)
+		if err2 != nil {
+			fmt.Fprintln(os.Stderr, "embedder init error:", err2)
+			os.Exit(1)
+		}
+		defer emb.Close()
 	}
 
 	data, err := os.ReadFile(*dataPath)
@@ -78,43 +96,102 @@ func main() {
 		}
 
 		// Index sessions — one drawer per session, content = concatenated messages
+		var sessionContents []string
+		var sessionIDs []string
 		for j, session := range q.Sessions {
 			var parts []string
 			for _, m := range session {
 				parts = append(parts, m.Content)
 			}
 			content := strings.Join(parts, "\n")
-			sessionID := fmt.Sprintf("sess_%d", j)
+			sid := fmt.Sprintf("sess_%d", j)
 			if j < len(q.SessionIDs) {
-				sessionID = q.SessionIDs[j]
+				sid = q.SessionIDs[j]
 			}
-			s.Add(store.Drawer{
-				ID:       sessionID,
-				Document: content,
-				Wing:     "bench",
-				Room:     "haystack",
-			})
+			sessionContents = append(sessionContents, content)
+			sessionIDs = append(sessionIDs, sid)
+		}
+
+		if *mode == "vector" && emb != nil {
+			// Batch embed all sessions
+			vecs, err := emb.EmbedBatch(sessionContents)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "embed error for %s: %v\n", q.QuestionID, err)
+				s.Close()
+				os.RemoveAll(dir)
+				continue
+			}
+			for j := range sessionContents {
+				s.AddWithEmbedding(store.Drawer{
+					ID: sessionIDs[j], Document: sessionContents[j],
+					Wing: "bench", Room: "haystack",
+				}, vecs[j])
+			}
+		} else {
+			for j := range sessionContents {
+				s.Add(store.Drawer{
+					ID: sessionIDs[j], Document: sessionContents[j],
+					Wing: "bench", Room: "haystack",
+				})
+			}
 		}
 
 		// Search
 		start := time.Now()
-		results, err := s.Search(q.QuestionText, 10, store.Query{})
+		var resultIDs []string
+		if *mode == "vector" && emb != nil {
+			queryVec, err := emb.Embed(q.QuestionText)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "query embed error for %s: %v\n", q.QuestionID, err)
+				s.Close()
+				os.RemoveAll(dir)
+				continue
+			}
+			vecResults, err := s.VectorSearch(queryVec, 10, store.Query{})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "vector search error for %s: %v\n", q.QuestionID, err)
+				s.Close()
+				os.RemoveAll(dir)
+				continue
+			}
+			for _, r := range vecResults {
+				resultIDs = append(resultIDs, r.ID)
+			}
+		} else if *mode == "hybrid" {
+			hybridResults, err := search.HybridSearch(s, q.QuestionText, 10, store.Query{})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "search error for %s: %v\n", q.QuestionID, err)
+				s.Close()
+				os.RemoveAll(dir)
+				continue
+			}
+			for _, r := range hybridResults {
+				resultIDs = append(resultIDs, r.ID)
+			}
+		} else {
+			rawResults, err := s.Search(q.QuestionText, 10, store.Query{})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "search error for %s: %v\n", q.QuestionID, err)
+				s.Close()
+				os.RemoveAll(dir)
+				continue
+			}
+			for _, r := range rawResults {
+				resultIDs = append(resultIDs, r.ID)
+			}
+		}
 		latency := time.Since(start)
 		totalLatency += latency
 
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "search error for %s: %v\n", q.QuestionID, err)
-			s.Close()
-			os.RemoveAll(dir)
-			continue
+		// Gold sessions from dataset — check if ANY answer session is in results
+		goldSet := make(map[string]bool)
+		for _, gid := range q.AnswerSessionIDs {
+			goldSet[gid] = true
 		}
 
-		// Find gold session — the one whose content contains the answer
-		goldID := findGoldSessionID(q)
-
 		rank := -1
-		for r, res := range results {
-			if res.ID == goldID {
+		for r, id := range resultIDs {
+			if goldSet[id] {
 				rank = r + 1
 				break
 			}
@@ -150,7 +227,7 @@ func main() {
 	}
 
 	// Print results
-	fmt.Printf("\n=== LongMemEval Results (Go FTS5) ===\n")
+	fmt.Printf("\n=== LongMemEval Results (Go FTS5, mode=%s) ===\n", *mode)
 	fmt.Printf("Questions: %d\n", total)
 	fmt.Printf("R@5:  %.1f%% (%d/%d)\n", float64(hit5)/float64(total)*100, hit5, total)
 	fmt.Printf("R@10: %.1f%% (%d/%d)\n", float64(hit10)/float64(total)*100, hit10, total)
@@ -165,33 +242,3 @@ func main() {
 	}
 }
 
-// findGoldSessionID returns the session ID of the session most likely containing
-// the answer. It searches for the session whose content best matches the answer text.
-func findGoldSessionID(q Question) string {
-	// Answer can be string or number in the JSON
-	var answerStr string
-	if err := json.Unmarshal(q.Answer, &answerStr); err != nil {
-		answerStr = strings.Trim(string(q.Answer), `"`)
-	}
-	answerLower := strings.ToLower(answerStr)
-	bestIdx := 0
-	bestScore := 0
-
-	for i, session := range q.Sessions {
-		score := 0
-		for _, m := range session {
-			if strings.Contains(strings.ToLower(m.Content), answerLower) {
-				score += 10
-			}
-		}
-		if score > bestScore {
-			bestScore = score
-			bestIdx = i
-		}
-	}
-
-	if bestIdx < len(q.SessionIDs) {
-		return q.SessionIDs[bestIdx]
-	}
-	return fmt.Sprintf("sess_%d", bestIdx)
-}
