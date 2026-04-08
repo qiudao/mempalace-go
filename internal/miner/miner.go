@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mempalace/mempalace-go/internal/embed"
 	"github.com/mempalace/mempalace-go/internal/normalize"
 	"github.com/mempalace/mempalace-go/internal/store"
 	"gopkg.in/yaml.v3"
@@ -40,17 +39,23 @@ var binaryExts = map[string]bool{
 // Mine walks a project directory, normalizes and chunks each text file,
 // detects the room from its path, and stores the resulting drawers in
 // a SQLite database at palacePath/mempalace.db.
+// Embedder is the interface for generating vector embeddings.
+type Embedder interface {
+	Embed(text string) ([]float32, error)
+	Close()
+}
+
 // Mine indexes project files into the palace. If embedder is non-nil,
 // also generates vector embeddings for semantic search.
-func Mine(projectDir, palacePath string, embedder ...*embed.Embedder) error {
-	var emb *embed.Embedder
+func Mine(projectDir, palacePath string, embedder ...Embedder) error {
+	var emb Embedder
 	if len(embedder) > 0 {
 		emb = embedder[0]
 	}
 	return mineImpl(projectDir, palacePath, emb)
 }
 
-func mineImpl(projectDir, palacePath string, emb *embed.Embedder) error {
+func mineImpl(projectDir, palacePath string, emb Embedder) error {
 	// Read config
 	cfgData, err := os.ReadFile(filepath.Join(projectDir, "mempalace.yaml"))
 	if err != nil {

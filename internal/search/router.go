@@ -32,8 +32,24 @@ var temporalSignals = []string{
 	"when did", "what did i do on", "recently",
 }
 
+// hasNonASCII checks if the query contains non-ASCII characters (CJK, etc.)
+func hasNonASCII(s string) bool {
+	for _, r := range s {
+		if r > 127 {
+			return true
+		}
+	}
+	return false
+}
+
 // ClassifyQuery determines the best search strategy for a query.
 func ClassifyQuery(query string) QueryType {
+	// Non-ASCII (Chinese, Japanese, Korean, etc.) → always use vector search
+	// because FTS5 porter/unicode61 tokenizer doesn't handle CJK word segmentation
+	if hasNonASCII(query) {
+		return QueryPreference // routes to pure Vector
+	}
+
 	lower := strings.ToLower(query)
 
 	for _, sig := range preferenceSignals {

@@ -15,7 +15,15 @@ import (
 // MineConvos walks sourceDir for conversation files (.txt, .json, .jsonl),
 // normalises each to transcript format, splits into exchange pairs, groups
 // them into chunks, and stores each chunk in the palace.
-func MineConvos(sourceDir, palacePath, wing string) error {
+func MineConvos(sourceDir, palacePath, wing string, embedder ...Embedder) error {
+	var emb Embedder
+	if len(embedder) > 0 {
+		emb = embedder[0]
+	}
+	return mineConvosImpl(sourceDir, palacePath, wing, emb)
+}
+
+func mineConvosImpl(sourceDir, palacePath, wing string, emb Embedder) error {
 	os.MkdirAll(palacePath, 0755)
 	s, err := store.Open(filepath.Join(palacePath, "mempalace.db"))
 	if err != nil {
@@ -46,14 +54,24 @@ func MineConvos(sourceDir, palacePath, wing string) error {
 		for _, chunk := range chunks {
 			room := detectConvoRoom(chunk)
 			id := fmt.Sprintf("%x", md5.Sum([]byte(wing+room+chunk)))
-			s.Add(store.Drawer{
+			drawer := store.Drawer{
 				ID:       id,
 				Document: chunk,
 				Wing:     wing,
 				Room:     room,
 				Source:   relPath,
 				FiledAt:  now,
-			})
+			}
+			if emb != nil {
+				vec, err := emb.Embed(chunk)
+				if err == nil {
+					s.AddWithEmbedding(drawer, vec)
+				} else {
+					s.Add(drawer)
+				}
+			} else {
+				s.Add(drawer)
+			}
 		}
 		return nil
 	})

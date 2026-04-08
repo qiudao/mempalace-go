@@ -100,40 +100,37 @@ func runInit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// defaultModelDir returns the ONNX model directory if it exists.
-func defaultModelDir() string {
+// tryEmbedder tries Ollama first, then ONNX, returns nil if neither available.
+func tryEmbedder() (embed.EmbedderI, string) {
+	// 1. Try Ollama (best: multilingual, any model)
+	ollamaEmb, err := embed.NewOllamaEmbedder("", "nomic-embed-text")
+	if err == nil {
+		return ollamaEmb, "ollama/nomic-embed-text"
+	}
+
+	// 2. Try ONNX (fallback: English-focused MiniLM)
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx")
 	if _, err := os.Stat(filepath.Join(dir, "model.onnx")); err == nil {
-		return dir
+		onnxEmb, err := embed.NewEmbedder(dir)
+		if err == nil {
+			return onnxEmb, "onnx/MiniLM-L6-v2"
+		}
 	}
-	return ""
-}
 
-// tryEmbedder attempts to create an embedder; returns nil if unavailable.
-func tryEmbedder() *embed.Embedder {
-	dir := defaultModelDir()
-	if dir == "" {
-		return nil
-	}
-	emb, err := embed.NewEmbedder(dir)
-	if err != nil {
-		return nil
-	}
-	return emb
+	return nil, ""
 }
 
 func runMine(cmd *cobra.Command, args []string) error {
 	dir := args[0]
 	cfg := loadConfig()
 
-	// Auto-detect ONNX model for vector embeddings
-	emb := tryEmbedder()
+	emb, name := tryEmbedder()
 	if emb != nil {
 		defer emb.Close()
-		fmt.Println("ONNX embedder loaded — mining with vector embeddings")
+		fmt.Printf("Embedder: %s — mining with vector embeddings\n", name)
 	} else {
-		fmt.Println("No ONNX model found — mining with text only (BM25 search)")
+		fmt.Println("No embedder available — mining with text only (BM25 search)")
 	}
 
 	if mineMode == "convos" {
@@ -142,7 +139,7 @@ func runMine(cmd *cobra.Command, args []string) error {
 			wingName = filepath.Base(dir)
 		}
 		fmt.Printf("Mining conversations from %s into wing %q...\n", dir, wingName)
-		return miner.MineConvos(dir, cfg.PalacePath, wingName)
+		return miner.MineConvos(dir, cfg.PalacePath, wingName, emb)
 	}
 	fmt.Printf("Mining project from %s...\n", dir)
 	return miner.Mine(dir, cfg.PalacePath, emb)
@@ -156,7 +153,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	defer s.Close()
 
 	// Try smart search (vector + BM25) if embedder is available
-	emb := tryEmbedder()
+	emb, _ := tryEmbedder()
 	if emb != nil {
 		defer emb.Close()
 		queryVec, err := emb.Embed(args[0])
