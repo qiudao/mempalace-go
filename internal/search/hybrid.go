@@ -59,10 +59,15 @@ type HybridResult struct {
 	BoostedRank float64
 }
 
-// FusedSearch combines BM25 (FTS5) and vector search using Reciprocal Rank Fusion.
-// Each result gets score = 1/(k+rank_bm25) + 1/(k+rank_vec), k=60 by default.
-// This captures both exact keyword matches (BM25) and semantic similarity (vector).
+// FusedSearch combines BM25 (FTS5) and vector search using weighted Reciprocal Rank Fusion.
+// Vector gets higher weight (vecWeight) to capture semantic matches that BM25 misses.
+// score = bm25Weight/(k+rank_bm25) + vecWeight/(k+rank_vec)
 func FusedSearch(s *store.Store, query string, queryVec []float32, limit int, q store.Query) ([]store.SearchResult, error) {
+	return FusedSearchWeighted(s, query, queryVec, limit, q, 1.0, 1.5)
+}
+
+// FusedSearchWeighted is FusedSearch with explicit BM25/vector weights.
+func FusedSearchWeighted(s *store.Store, query string, queryVec []float32, limit int, q store.Query, bm25Weight, vecWeight float64) ([]store.SearchResult, error) {
 	const k = 60 // RRF constant
 	pool := limit * 5
 	if pool < 50 {
@@ -72,25 +77,25 @@ func FusedSearch(s *store.Store, query string, queryVec []float32, limit int, q 
 	// BM25 results
 	bm25Results, err := s.Search(query, pool, q)
 	if err != nil {
-		bm25Results = nil // fallback to vector only
+		bm25Results = nil
 	}
 
 	// Vector results
 	vecResults, err := s.VectorSearch(queryVec, pool, q)
 	if err != nil {
-		vecResults = nil // fallback to BM25 only
+		vecResults = nil
 	}
 
-	// Build RRF scores
+	// Build weighted RRF scores
 	scores := make(map[string]float64)
 	drawerMap := make(map[string]store.SearchResult)
 
 	for rank, r := range bm25Results {
-		scores[r.ID] += 1.0 / float64(k+rank+1)
+		scores[r.ID] += bm25Weight / float64(k+rank+1)
 		drawerMap[r.ID] = r
 	}
 	for rank, r := range vecResults {
-		scores[r.ID] += 1.0 / float64(k+rank+1)
+		scores[r.ID] += vecWeight / float64(k+rank+1)
 		drawerMap[r.ID] = r
 	}
 
