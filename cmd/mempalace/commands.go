@@ -16,10 +16,11 @@ import (
 )
 
 var (
-	mineMode string // "projects" or "convos"
-	wing     string
-	room     string
-	limit    int
+	mineMode   string // "projects" or "convos"
+	wing       string
+	room       string
+	limit      int
+	embedModel string // ollama model name
 )
 
 func init() {
@@ -40,6 +41,7 @@ func init() {
 	}
 	mineCmd.Flags().StringVar(&mineMode, "mode", "projects", "Mining mode: projects or convos")
 	mineCmd.Flags().StringVar(&wing, "wing", "", "Wing name (for convos mode)")
+	mineCmd.Flags().StringVar(&embedModel, "embed-model", "", "Ollama embedding model (default: nomic-embed-text)")
 	rootCmd.AddCommand(mineCmd)
 
 	// search command
@@ -103,9 +105,13 @@ func runInit(cmd *cobra.Command, args []string) error {
 // tryEmbedder tries Ollama first, then ONNX, returns nil if neither available.
 func tryEmbedder() (embed.EmbedderI, string) {
 	// 1. Try Ollama (best: multilingual, any model)
-	ollamaEmb, err := embed.NewOllamaEmbedder("", "nomic-embed-text")
+	model := embedModel
+	if model == "" {
+		model = "nomic-embed-text"
+	}
+	ollamaEmb, err := embed.NewOllamaEmbedder("", model)
 	if err == nil {
-		return ollamaEmb, "ollama/nomic-embed-text"
+		return ollamaEmb, "ollama/" + model
 	}
 
 	// 2. Try ONNX (fallback: English-focused MiniLM)
