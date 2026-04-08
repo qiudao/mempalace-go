@@ -99,9 +99,12 @@ func main() {
 		var sessionContents []string
 		var sessionIDs []string
 		for j, session := range q.Sessions {
+			// Match Python benchmark: only index user turns
 			var parts []string
 			for _, m := range session {
-				parts = append(parts, m.Content)
+				if m.Role == "user" {
+					parts = append(parts, m.Content)
+				}
 			}
 			content := strings.Join(parts, "\n")
 			sid := fmt.Sprintf("sess_%d", j)
