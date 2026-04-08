@@ -37,7 +37,7 @@ func main() {
 	dataPath := flag.String("data", "", "Path to longmemeval JSON")
 	limitQ := flag.Int("limit", 0, "Limit number of questions (0 = all)")
 	csvOut := flag.String("csv", "", "Output CSV path")
-	mode := flag.String("mode", "raw", "Search mode: raw, hybrid, or vector")
+	mode := flag.String("mode", "raw", "Search mode: raw, hybrid, vector, or fused")
 	flag.Parse()
 
 	if *dataPath == "" {
@@ -45,9 +45,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Initialize embedder for vector mode (reuse across questions)
+	// Initialize embedder for vector/fused mode (reuse across questions)
 	var emb *embed.Embedder
-	if *mode == "vector" {
+	if *mode == "vector" || *mode == "fused" {
 		home, _ := os.UserHomeDir()
 		modelDir := filepath.Join(home, ".cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx")
 		var err2 error
@@ -115,7 +115,7 @@ func main() {
 			sessionIDs = append(sessionIDs, sid)
 		}
 
-		if *mode == "vector" && emb != nil {
+		if (*mode == "vector" || *mode == "fused") && emb != nil {
 			// Batch embed all sessions
 			vecs, err := emb.EmbedBatch(sessionContents)
 			if err != nil {
@@ -142,7 +142,25 @@ func main() {
 		// Search
 		start := time.Now()
 		var resultIDs []string
-		if *mode == "vector" && emb != nil {
+		if *mode == "fused" && emb != nil {
+			queryVec, err := emb.Embed(q.QuestionText)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "query embed error for %s: %v\n", q.QuestionID, err)
+				s.Close()
+				os.RemoveAll(dir)
+				continue
+			}
+			fusedResults, err := search.FusedSearch(s, q.QuestionText, queryVec, 10, store.Query{})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "fused search error for %s: %v\n", q.QuestionID, err)
+				s.Close()
+				os.RemoveAll(dir)
+				continue
+			}
+			for _, r := range fusedResults {
+				resultIDs = append(resultIDs, r.ID)
+			}
+		} else if *mode == "vector" && emb != nil {
 			queryVec, err := emb.Embed(q.QuestionText)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "query embed error for %s: %v\n", q.QuestionID, err)

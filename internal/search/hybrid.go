@@ -59,6 +59,67 @@ type HybridResult struct {
 	BoostedRank float64
 }
 
+// FusedSearch combines BM25 (FTS5) and vector search using Reciprocal Rank Fusion.
+// Each result gets score = 1/(k+rank_bm25) + 1/(k+rank_vec), k=60 by default.
+// This captures both exact keyword matches (BM25) and semantic similarity (vector).
+func FusedSearch(s *store.Store, query string, queryVec []float32, limit int, q store.Query) ([]store.SearchResult, error) {
+	const k = 60 // RRF constant
+	pool := limit * 5
+	if pool < 50 {
+		pool = 50
+	}
+
+	// BM25 results
+	bm25Results, err := s.Search(query, pool, q)
+	if err != nil {
+		bm25Results = nil // fallback to vector only
+	}
+
+	// Vector results
+	vecResults, err := s.VectorSearch(queryVec, pool, q)
+	if err != nil {
+		vecResults = nil // fallback to BM25 only
+	}
+
+	// Build RRF scores
+	scores := make(map[string]float64)
+	drawerMap := make(map[string]store.SearchResult)
+
+	for rank, r := range bm25Results {
+		scores[r.ID] += 1.0 / float64(k+rank+1)
+		drawerMap[r.ID] = r
+	}
+	for rank, r := range vecResults {
+		scores[r.ID] += 1.0 / float64(k+rank+1)
+		drawerMap[r.ID] = r
+	}
+
+	// Sort by fused score descending
+	type scored struct {
+		id    string
+		score float64
+	}
+	var ranked []scored
+	for id, sc := range scores {
+		ranked = append(ranked, scored{id, sc})
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		return ranked[i].score > ranked[j].score
+	})
+
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+
+	var out []store.SearchResult
+	for _, r := range ranked {
+		sr := drawerMap[r.id]
+		sr.Rank = -r.score // negative so higher score = better (consistent with FTS5 convention)
+		out = append(out, sr)
+	}
+	return out, nil
+}
+
 // HybridSearch performs FTS5 search then re-ranks results using keyword overlap boosting.
 // The boost formula is: boosted_rank = rank * (1.0 - 0.30 * overlap)
 // Since FTS5 BM25 rank is negative (more negative = better), multiplying by a
