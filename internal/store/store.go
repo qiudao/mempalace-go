@@ -179,20 +179,48 @@ type SearchResult struct {
 
 // Search queries the FTS5 index and returns drawers ranked by BM25 relevance.
 // Lower rank values indicate better matches. Results can be filtered by Query fields.
+// stopWords for FTS5 query filtering — removes words that match almost every document.
+var ftsStopWords = map[string]bool{
+	"i": true, "me": true, "my": true, "we": true, "our": true, "you": true, "your": true,
+	"he": true, "she": true, "it": true, "they": true, "them": true, "their": true,
+	"a": true, "an": true, "the": true, "this": true, "that": true, "these": true, "those": true,
+	"is": true, "am": true, "are": true, "was": true, "were": true, "be": true, "been": true,
+	"do": true, "did": true, "does": true, "done": true, "have": true, "has": true, "had": true,
+	"will": true, "would": true, "could": true, "should": true, "can": true, "may": true,
+	"not": true, "no": true, "so": true, "if": true, "but": true, "and": true, "or": true,
+	"in": true, "on": true, "at": true, "to": true, "for": true, "of": true, "with": true,
+	"by": true, "from": true, "up": true, "out": true, "about": true, "into": true,
+	"what": true, "when": true, "where": true, "who": true, "how": true, "which": true,
+	"there": true, "here": true, "than": true, "then": true, "also": true, "just": true,
+	"get": true, "got": true, "give": true, "gave": true, "make": true, "made": true,
+	"go": true, "went": true, "come": true, "came": true, "take": true, "took": true,
+	"some": true, "any": true, "all": true, "very": true, "much": true, "more": true,
+	"ago": true, "last": true, "being": true,
+}
+
 // sanitizeFTS5 converts raw text into a safe FTS5 query by extracting
-// alphanumeric words and joining them with OR.
+// content words (stop words removed) and joining with OR.
 func sanitizeFTS5(text string) string {
-	words := strings.FieldsFunc(text, func(r rune) bool {
-		return !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') || r == '_')
+	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_')
 	})
-	if len(words) == 0 {
-		return ""
+	var quoted []string
+	for _, w := range words {
+		if len(w) < 2 || ftsStopWords[w] {
+			continue
+		}
+		quoted = append(quoted, `"`+w+`"`)
 	}
-	// Quote each word to avoid FTS5 syntax issues
-	quoted := make([]string, len(words))
-	for i, w := range words {
-		quoted[i] = `"` + w + `"`
+	if len(quoted) == 0 {
+		// Fallback: use all words if everything was filtered
+		for _, w := range words {
+			if len(w) >= 2 {
+				quoted = append(quoted, `"`+w+`"`)
+			}
+		}
+	}
+	if len(quoted) == 0 {
+		return ""
 	}
 	return strings.Join(quoted, " OR ")
 }

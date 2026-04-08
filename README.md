@@ -19,17 +19,18 @@ Every conversation you have with an AI disappears when the session ends. MemPala
 
 The Python version depends on ChromaDB (which pulls in PyTorch, ONNX, tokenizers — ~500MB). This Go version replaces vector search with SQLite FTS5 keyword search:
 
-| | Python (ChromaDB) | Go (SQLite FTS5) |
-|---|---|---|
-| Binary size | ~500MB deps | ~15MB single binary |
-| Search type | Semantic (vector) | Keyword (BM25) |
-| LongMemEval R@5 | 92.0% | 80.0% |
-| LongMemEval R@10 | 98.0% | 84.0% |
-| Latency/query | 1,430ms | **1.08ms** |
-| External deps | ChromaDB, ONNX, PyTorch | None |
-| API keys needed | None | None |
+| | Python (ChromaDB) | Go BM25 | Go Vector | Go Fused |
+|---|---|---|---|---|
+| **LongMemEval R@5** | 96.6% | 96.2% | 96.4% | **97.4%** |
+| **LongMemEval R@10** | 98.2% | 97.6% | 98.2% | **99.2%** |
+| Latency/query | 1,810ms | **1ms** | 41ms | 45ms |
+| Search type | Semantic | Keyword | Semantic | Keyword+Semantic |
+| ONNX model needed | Yes (internal) | No | Yes | Yes |
+| External deps | ~500MB | None | ONNX Runtime | ONNX Runtime |
 
-Trade-off: ~12pp lower recall for 1000x faster queries and zero dependencies. For most use cases (searching your own words), keyword search works well.
+Three search modes: **BM25** (FTS5 keyword, zero deps, 1ms), **Vector** (ONNX MiniLM-L6-v2, same model as ChromaDB), **Fused** (BM25 + Vector via Reciprocal Rank Fusion — best quality).
+
+Cross-validated: Python BM25+Vector fusion with same algorithm achieves 97.4% R@5, confirming the Go result.
 
 ## Quick Start
 
