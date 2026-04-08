@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mempalace/mempalace-go/internal/embed"
 	"github.com/mempalace/mempalace-go/internal/normalize"
 	"github.com/mempalace/mempalace-go/internal/store"
 	"gopkg.in/yaml.v3"
@@ -39,7 +40,17 @@ var binaryExts = map[string]bool{
 // Mine walks a project directory, normalizes and chunks each text file,
 // detects the room from its path, and stores the resulting drawers in
 // a SQLite database at palacePath/mempalace.db.
-func Mine(projectDir, palacePath string) error {
+// Mine indexes project files into the palace. If embedder is non-nil,
+// also generates vector embeddings for semantic search.
+func Mine(projectDir, palacePath string, embedder ...*embed.Embedder) error {
+	var emb *embed.Embedder
+	if len(embedder) > 0 {
+		emb = embedder[0]
+	}
+	return mineImpl(projectDir, palacePath, emb)
+}
+
+func mineImpl(projectDir, palacePath string, emb *embed.Embedder) error {
 	// Read config
 	cfgData, err := os.ReadFile(filepath.Join(projectDir, "mempalace.yaml"))
 	if err != nil {
@@ -111,14 +122,24 @@ func Mine(projectDir, palacePath string) error {
 		chunks := ChunkText(content, 800, 100)
 		for _, chunk := range chunks {
 			id := fmt.Sprintf("%x", md5.Sum([]byte(cfg.Wing+room+chunk)))
-			s.Add(store.Drawer{
+			drawer := store.Drawer{
 				ID:       id,
 				Document: chunk,
 				Wing:     cfg.Wing,
 				Room:     room,
 				Source:   relPath,
 				FiledAt:  now,
-			})
+			}
+			if emb != nil {
+				vec, err := emb.Embed(chunk)
+				if err == nil {
+					s.AddWithEmbedding(drawer, vec)
+				} else {
+					s.Add(drawer) // fallback to text-only
+				}
+			} else {
+				s.Add(drawer)
+			}
 		}
 		return nil
 	})

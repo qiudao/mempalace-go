@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/mempalace/mempalace-go/internal/config"
+	"github.com/mempalace/mempalace-go/internal/embed"
 	"github.com/mempalace/mempalace-go/internal/layers"
 	"github.com/mempalace/mempalace-go/internal/miner"
 	"github.com/mempalace/mempalace-go/internal/search"
@@ -99,9 +100,41 @@ func runInit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// defaultModelDir returns the ONNX model directory if it exists.
+func defaultModelDir() string {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".cache/chroma/onnx_models/all-MiniLM-L6-v2/onnx")
+	if _, err := os.Stat(filepath.Join(dir, "model.onnx")); err == nil {
+		return dir
+	}
+	return ""
+}
+
+// tryEmbedder attempts to create an embedder; returns nil if unavailable.
+func tryEmbedder() *embed.Embedder {
+	dir := defaultModelDir()
+	if dir == "" {
+		return nil
+	}
+	emb, err := embed.NewEmbedder(dir)
+	if err != nil {
+		return nil
+	}
+	return emb
+}
+
 func runMine(cmd *cobra.Command, args []string) error {
 	dir := args[0]
 	cfg := loadConfig()
+
+	// Auto-detect ONNX model for vector embeddings
+	emb := tryEmbedder()
+	if emb != nil {
+		defer emb.Close()
+		fmt.Println("ONNX embedder loaded — mining with vector embeddings")
+	} else {
+		fmt.Println("No ONNX model found — mining with text only (BM25 search)")
+	}
 
 	if mineMode == "convos" {
 		wingName := wing
@@ -112,7 +145,7 @@ func runMine(cmd *cobra.Command, args []string) error {
 		return miner.MineConvos(dir, cfg.PalacePath, wingName)
 	}
 	fmt.Printf("Mining project from %s...\n", dir)
-	return miner.Mine(dir, cfg.PalacePath)
+	return miner.Mine(dir, cfg.PalacePath, emb)
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -121,6 +154,31 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer s.Close()
+
+	// Try smart search (vector + BM25) if embedder is available
+	emb := tryEmbedder()
+	if emb != nil {
+		defer emb.Close()
+		queryVec, err := emb.Embed(args[0])
+		if err == nil {
+			results, err := search.SmartSearch(s, args[0], queryVec, limit, store.Query{Wing: wing, Room: room})
+			if err == nil && len(results) > 0 {
+				for i, r := range results {
+					fmt.Printf("\n--- Result %d [%s/%s] ---\n", i+1, r.Wing, r.Room)
+					fmt.Printf("Source: %s | Filed: %s\n", r.Source, r.FiledAt)
+					doc := r.Document
+					if len(doc) > 500 {
+						doc = doc[:500] + "..."
+					}
+					fmt.Println(doc)
+				}
+				fmt.Printf("\n%d result(s) found. (smart search)\n", len(results))
+				return nil
+			}
+		}
+	}
+
+	// Fallback to BM25
 	return search.Search(s, args[0], limit, wing, room)
 }
 
