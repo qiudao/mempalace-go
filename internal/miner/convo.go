@@ -49,7 +49,7 @@ func mineConvosImpl(sourceDir, palacePath, wing string, emb Embedder) error {
 
 		relPath, _ := filepath.Rel(sourceDir, path)
 		exchanges := splitExchanges(content)
-		chunks := groupExchanges(exchanges, 3) // 3 exchanges per chunk
+		chunks := groupExchanges(exchanges, 1) // 1 exchange per chunk for fine-grained search
 
 		for _, chunk := range chunks {
 			room := detectConvoRoom(chunk)
