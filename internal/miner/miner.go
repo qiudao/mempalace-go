@@ -42,6 +42,7 @@ var binaryExts = map[string]bool{
 // Embedder is the interface for generating vector embeddings.
 type Embedder interface {
 	Embed(text string) ([]float32, error)
+	EmbedBatch(texts []string) ([][]float32, error)
 	Close()
 }
 

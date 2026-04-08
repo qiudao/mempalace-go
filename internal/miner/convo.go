@@ -51,26 +51,36 @@ func mineConvosImpl(sourceDir, palacePath, wing string, emb Embedder) error {
 		exchanges := splitExchanges(content)
 		chunks := groupExchanges(exchanges, 1) // 1 exchange per chunk for fine-grained search
 
+		// Build all drawers first
+		drawers := make([]store.Drawer, 0, len(chunks))
 		for _, chunk := range chunks {
 			room := detectConvoRoom(chunk)
 			id := fmt.Sprintf("%x", md5.Sum([]byte(wing+room+chunk)))
-			drawer := store.Drawer{
-				ID:       id,
-				Document: chunk,
-				Wing:     wing,
-				Room:     room,
-				Source:   relPath,
-				FiledAt:  now,
+			drawers = append(drawers, store.Drawer{
+				ID: id, Document: chunk, Wing: wing,
+				Room: room, Source: relPath, FiledAt: now,
+			})
+		}
+
+		// Batch embed if available
+		if emb != nil {
+			texts := make([]string, len(drawers))
+			for i, d := range drawers {
+				texts[i] = d.Document
 			}
-			if emb != nil {
-				vec, err := emb.Embed(chunk)
-				if err == nil {
-					s.AddWithEmbedding(drawer, vec)
-				} else {
-					s.Add(drawer)
+			vecs, err := emb.EmbedBatch(texts)
+			if err == nil && len(vecs) == len(drawers) {
+				for i, d := range drawers {
+					s.AddWithEmbedding(d, vecs[i])
 				}
 			} else {
-				s.Add(drawer)
+				for _, d := range drawers {
+					s.Add(d)
+				}
+			}
+		} else {
+			for _, d := range drawers {
+				s.Add(d)
 			}
 		}
 		return nil
