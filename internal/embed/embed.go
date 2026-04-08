@@ -8,12 +8,21 @@ import (
 	ort "github.com/yalue/onnxruntime_go"
 )
 
-const defaultMaxLen = 128
+const defaultMaxLen = 256
+
+var runtimeInitialized bool
 
 // InitRuntime initialises the ONNX Runtime shared library.
 func InitRuntime() error {
+	if runtimeInitialized {
+		return nil
+	}
 	ort.SetSharedLibraryPath("/opt/homebrew/lib/libonnxruntime.dylib")
-	return ort.InitializeEnvironment()
+	if err := ort.InitializeEnvironment(); err != nil {
+		return err
+	}
+	runtimeInitialized = true
+	return nil
 }
 
 // DestroyRuntime tears down the ONNX Runtime environment.

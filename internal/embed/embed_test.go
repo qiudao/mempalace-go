@@ -73,15 +73,10 @@ func TestTokenize(t *testing.T) {
 	t.Logf("Tokenized 'this is a test' -> ids[0:%d]: %v", sepIdx+1, ids[:sepIdx+1])
 }
 
-var runtimeInitialized bool
-
 func setupRuntime(t *testing.T) {
 	t.Helper()
-	if !runtimeInitialized {
-		if err := InitRuntime(); err != nil {
-			t.Fatalf("InitRuntime: %v", err)
-		}
-		runtimeInitialized = true
+	if err := InitRuntime(); err != nil {
+		t.Fatalf("InitRuntime: %v", err)
 	}
 }
 
