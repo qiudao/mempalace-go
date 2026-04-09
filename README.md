@@ -1,36 +1,56 @@
 # MemPalace-Go
 
-MemPalace rewritten in Go. AI memory system with SQLite FTS5, zero external APIs, single binary.
+**Give your AI a memory — fast, local, multilingual.**
+
+MemPalace rewritten in Go. Single binary, SQLite storage, Ollama-powered semantic search.
 
 Original: [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempalace) (Python/ChromaDB)
 
-## What It Does
+## The Problem
 
-Every conversation you have with an AI disappears when the session ends. MemPalace stores everything — conversations, project files, decisions, preferences — and makes it searchable. Your AI remembers.
+Every AI conversation disappears when the session ends. Six months of decisions, debugging sessions, architecture debates — gone. You start over every time.
 
-- **Mine** project files and conversation exports into a structured palace
-- **Search** with BM25 full-text search (SQLite FTS5)
-- **4-layer memory stack** — identity, essential story, on-demand recall, full search
-- **AAAK dialect** — 30x compression for AI context windows
-- **MCP server** — Claude Code integration over JSON-RPC stdio
-- **Knowledge graph** — temporal entity relationships with validity tracking
+MemPalace stores everything and makes it searchable. Your AI remembers.
 
-## Why Go
+## What Changed from Python
 
-The Python version depends on ChromaDB (which pulls in PyTorch, ONNX, tokenizers — ~500MB). This Go version replaces vector search with SQLite FTS5 keyword search:
+| | Python (ChromaDB) | **Go (this repo)** |
+|---|---|---|
+| **LongMemEval R@5** | 96.6% | **98.0%** (Smart Search) |
+| **Search latency** | 555ms | **58ms** (10x faster) |
+| **Mine latency** | 15.8s | **7.1s** (2.2x faster) |
+| **Chinese/multilingual** | Partial (MiniLM) | **Full** (Ollama nomic) |
+| **Binary** | ~500MB deps | **~15MB** single binary |
+| **Embedding backend** | ChromaDB internal | **Ollama** (any model) / ONNX fallback |
+| **API keys** | None | None |
 
-| | Python (ChromaDB) | Go BM25 | Go Vector | Go Fused |
-|---|---|---|---|---|
-| **LongMemEval R@5** | 96.6% | 96.2% | 96.4% | **97.4%** |
-| **LongMemEval R@10** | 98.2% | 97.6% | 98.2% | **99.2%** |
-| Latency/query | 1,810ms | **1ms** | 41ms | 45ms |
-| Search type | Semantic | Keyword | Semantic | Keyword+Semantic |
-| ONNX model needed | Yes (internal) | No | Yes | Yes |
-| External deps | ~500MB | None | ONNX Runtime | ONNX Runtime |
+### Key Improvements
 
-Three search modes: **BM25** (FTS5 keyword, zero deps, 1ms), **Vector** (ONNX MiniLM-L6-v2, same model as ChromaDB), **Fused** (BM25 + Vector via Reciprocal Rank Fusion — best quality).
+**Smart Search** — Auto-routes queries to the optimal search strategy:
+- CJK/multilingual queries → pure Vector (FTS5 can't segment Chinese)
+- Preference/recommendation queries → pure Vector (avoids BM25 vocabulary mismatch)
+- Fact queries → Fused BM25-heavy (exact keywords dominate)
+- Temporal queries → Fused balanced (both signals help)
 
-Cross-validated: Python BM25+Vector fusion with same algorithm achieves 97.4% R@5, confirming the Go result.
+**Ollama Integration** — Supports any local embedding model:
+```bash
+mempalace mine ./project                               # default: nomic-embed-text
+mempalace mine ./project --embed-model mxbai-embed-large  # higher quality
+```
+Auto-detection: Ollama → ONNX → BM25 fallback. No configuration needed.
+
+**Three Search Modes** combined via Reciprocal Rank Fusion:
+- **BM25** (FTS5 porter stemmer) — 1ms, zero deps, exact keyword matching
+- **Vector** (Ollama/ONNX) — 41ms, semantic similarity
+- **Fused** — BM25 + Vector RRF, best overall quality
+
+**Real-World Validated** — Tested on actual Claude Code sessions (Chinese + English):
+```
+Python ChromaDB:  15/15 hits, 555ms avg
+Go + Ollama:      15/15 hits,  58ms avg  ← same quality, 10x faster
+```
+
+Cross-validated on LongMemEval (500 questions): Python BM25+Vector RRF achieves the same 97.4% R@5, confirming Go's result is not inflated.
 
 ## Quick Start
 
@@ -47,7 +67,7 @@ make build
 # Mine conversations (Claude, ChatGPT, Slack exports)
 ./bin/mempalace mine ~/chats/ --mode convos --wing my_chats
 
-# Search
+# Search (auto-detects best mode)
 ./bin/mempalace search "why did we switch to GraphQL"
 
 # Show identity + essential story
@@ -57,17 +77,63 @@ make build
 ./bin/mempalace status
 ```
 
+### Prerequisites
+
+- Go 1.22+
+- [Ollama](https://ollama.com/) (recommended, for semantic search):
+  ```bash
+  ollama pull nomic-embed-text   # 274MB, multilingual
+  ```
+  Without Ollama, falls back to BM25 keyword search (still 96.2% R@5).
+
 ## MCP Server (Claude Code)
 
 ```bash
-# Build the binary
-make build
-
-# Connect to Claude Code
 claude mcp add mempalace -- /path/to/bin/mempalace mcp
 ```
 
-Tools available: `mempalace_status`, `mempalace_search`, `mempalace_list_wings`, `mempalace_list_rooms`, `mempalace_add_drawer`, `mempalace_delete_drawer`, `mempalace_kg_query`, `mempalace_kg_add`, `mempalace_traverse_graph`
+9 tools available: `status`, `search`, `list_wings`, `list_rooms`, `add_drawer`, `delete_drawer`, `kg_query`, `kg_add`, `traverse_graph`
+
+Claude Code calls these automatically — you never type `mempalace search` manually.
+
+## How It Works
+
+**1. Mine** — Conversations and projects are split into focused chunks (1 exchange = 1 drawer), classified into wings/rooms, embedded via Ollama, and indexed in SQLite.
+
+**2. Search** — SmartSearch classifies the query and routes to the optimal strategy. Results are ranked by BM25 keyword scores, vector similarity, or both fused via RRF.
+
+**3. Remember** — 4-layer memory stack loads only what's needed:
+```
+L0: "Who am I"           (~100 tokens)   ← always loaded
+L1: "My core story"      (~500 tokens)   ← always loaded
+L2: Wing/room recall     (on demand)     ← AI walks to the right room
+L3: Full search          (on demand)     ← AI searches across everything
+```
+
+**4. Compress** — AAAK dialect shrinks months of context into ~1,000 tokens for the AI's context window. A full day of conversation (32K tokens) compresses to ~1K tokens.
+
+### The Palace Structure
+
+```
+Palace
+├── Wing: tradingview           ← project
+│   ├── Room: frontend          ← topic
+│   │   └── Drawer: "涨幅扫描 UI 播放功能..."
+│   └── Room: backend
+│       └── Drawer: "screen-gain command..."
+├── Wing: alice_chats           ← person
+│   └── Room: architecture
+│       └── Drawer: "decided to use GraphQL..."
+```
+
+### Knowledge Graph
+
+Temporal entity relationships with validity tracking:
+```
+Alice —[works_at]→ Acme    (2024-01 ~ 2025-06)
+Alice —[works_at]→ NewCo   (2025-06 ~ now)
+→ "Where does Alice work?" → NewCo (auto-tracks changes)
+```
 
 ## Architecture
 
@@ -77,82 +143,46 @@ cmd/
   bench/         LongMemEval benchmark runner
 
 internal/
-  store/         SQLite + FTS5 storage layer
+  store/         SQLite + FTS5 + vector storage
   config/        Config (env > file > defaults)
-  normalize/     Chat export format conversion (Claude, ChatGPT, Slack, JSONL, plain text)
-  miner/         Project mining, conversation mining, chunking, room detection, memory extraction
-  search/        FTS5 search + hybrid keyword boosting
-  layers/        4-layer memory stack (L0 identity, L1 story, L2 recall, L3 search)
-  graph/         Knowledge graph (temporal triples) + palace graph (BFS traversal)
+  normalize/     Format conversion (Claude, ChatGPT, Slack, JSONL, text)
+  miner/         Project + conversation mining, chunking, room detection
+  search/        SmartSearch router, BM25, vector, fused RRF, hybrid boost
+  layers/        4-layer memory stack
+  graph/         Knowledge graph (temporal triples) + palace graph (BFS)
   dialect/       AAAK compressed symbolic memory language
-  entity/        Entity detector (regex heuristics) + persistent JSON registry
+  entity/        Entity detector + persistent JSON registry
+  embed/         Ollama + ONNX embedding backends (EmbedderI interface)
   mcp/           MCP JSON-RPC server (9 tools)
 ```
 
-### The Palace Structure
-
-Memories are organized as:
-
-- **Wings** — people, projects, topics (e.g., `backend`, `alice_chats`)
-- **Rooms** — categories within a wing (e.g., `architecture`, `debugging`, `database`)
-- **Drawers** — individual text chunks with metadata
-
-### Memory Types
-
-The general extractor classifies text into 5 types:
-- **Decisions** — "we decided to use PostgreSQL"
-- **Preferences** — "I always use vim"
-- **Milestones** — "shipped the new API"
-- **Problems** — "critical bug in auth module"
-- **Emotional** — "frustrated with the deployment process"
-
-### AAAK Dialect
-
-A lossless shorthand for AI agents. Compresses months of context into ~120 tokens:
-
-```
-[T: database, migration, postgresql]
-[E: trust, hope]
-[F: DECISION, MILESTONE]
-[ENT: A1, B1]
-A1 B1 discussed migration. decided postgresql for jsonb support.
-migration completed, all tests passing.
-```
-
 ## Benchmark
-
-Compare Go FTS5 vs Python ChromaDB on LongMemEval:
 
 ```bash
 # Build benchmark runner
 go build -o bin/bench ./cmd/bench
 
-# Run (download data first — 265MB)
-./bin/bench --data longmemeval_s_cleaned.json --limit 50 --csv results.csv
+# Run LongMemEval (download data first — 265MB)
+./bin/bench --data longmemeval.json --mode smart --csv results.csv
+
+# Available modes: raw (BM25), vector, fused, smart
 ```
+
+| Mode | R@5 | R@10 | Latency |
+|------|-----|------|---------|
+| BM25 (raw) | 96.2% | 97.6% | 1ms |
+| Vector | 96.4% | 98.2% | 41ms |
+| Fused | 97.4% | 99.2% | 45ms |
+| **Smart** | **98.0%** | **99.0%** | 71ms |
+| Python ChromaDB | 96.6% | 98.2% | 1,810ms |
 
 ## Development
 
 ```bash
 make help     # Show all targets
 make build    # Build binary
-make test     # Run all tests
+make test     # Run all tests (~110 tests across 10 packages)
 make lint     # Run go vet
-```
-
-All tests:
-
-```
-internal/store      7 tests    SQLite CRUD + FTS5 search
-internal/config     3 tests    Config loading
-internal/normalize  8 tests    Format conversion
-internal/miner     23 tests    Mining, chunking, room detection, extraction
-internal/search    10 tests    Search + hybrid boosting
-internal/layers     4 tests    Memory stack
-internal/graph     11 tests    Knowledge graph + palace graph
-internal/dialect   11 tests    AAAK compression
-internal/entity    10 tests    Entity detection + registry
-internal/mcp       24 tests    MCP server + protocol
 ```
 
 ## Dependencies
@@ -160,6 +190,7 @@ internal/mcp       24 tests    MCP server + protocol
 - `modernc.org/sqlite` — Pure Go SQLite (no CGo)
 - `gopkg.in/yaml.v3` — YAML parsing
 - `github.com/spf13/cobra` — CLI framework
+- [Ollama](https://ollama.com/) — Local embedding API (optional, recommended)
 
 ## License
 
